@@ -547,7 +547,9 @@ describe.skipIf(!runControlPostgresSupport.supported)("heartbeat run-control dat
     expect(deps.startNextQueuedRunForAgent).toHaveBeenCalledTimes(1);
     expect(deps.processRunCancellationSettlements.size).toBe(0);
     expect(runningProcesses.has(run.id)).toBe(false);
-    expect(terminateLocalService).toHaveBeenCalledWith({ pid: 424242, processGroupId: 424242 }, { forceAfterMs: 100, signal: "SIGINT" });
+    expect(terminateLocalService).toHaveBeenCalledWith({ pid: 424242, processGroupId: 424242 }, {
+      forceAfterMs: 100, signal: "SIGINT", ...(process.platform === "win32" ? { requireProviderTree: true } : {}),
+    });
   });
 
   it("settles every joined Stop caller with the same termination failure", async () => {

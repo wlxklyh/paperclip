@@ -13,6 +13,7 @@ import {
 import { buildSshSpawnTarget, type SshRemoteExecutionSpec } from "./ssh.js";
 import { redactCommandText } from "./command-redaction.js";
 import { paperclipChatFilePreparationDelivery } from "./chat-file-delivery.js";
+import { registerWindowsProviderProcess, terminateWindowsProviderTree, waitForWindowsProviderCleanup } from "./windows-process-tree.js";
 import {
   PAPERCLIP_RUNNER_PERMISSION_CAPABILITIES,
   resolvePaperclipRunnerModel,
@@ -125,8 +126,10 @@ export function signalRunningProcess(
   running: Pick<RunningProcess, "child" | "processGroupId">,
   signal: NodeJS.Signals,
 ) {
+  if (process.platform === "win32") {
+    return terminateWindowsProviderTree(running.child.pid ?? 0);
+  }
   if (
-    process.platform !== "win32" &&
     running.processGroupId &&
     running.processGroupId > 0
   ) {
@@ -4768,6 +4771,7 @@ export async function runChildProcess(
         for (const [key, value] of Object.entries(childEnv)) {
           if (value === undefined) delete childEnv[key];
         }
+        const beforeSpawnMs = Date.now();
         const child = spawn(target.command, target.args, {
           cwd: target.cwd ?? opts.cwd,
           env: childEnv,
@@ -4775,6 +4779,7 @@ export async function runChildProcess(
           shell: false,
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
+        registerWindowsProviderProcess(child, beforeSpawnMs);
         const startedAt = new Date().toISOString();
         const processGroupId = resolveProcessGroupId(child);
 
@@ -4807,8 +4812,21 @@ export async function runChildProcess(
         let terminalCleanupForceKilled = false;
         let terminalCleanupTimer: NodeJS.Timeout | null = null;
         let terminalCleanupKillTimer: NodeJS.Timeout | null = null;
+        let timeoutKillTimer: NodeJS.Timeout | null = null;
         let terminalResultStdoutScanOffset = 0;
         let terminalResultStderrScanOffset = 0;
+        let processCleanup: Promise<void> = Promise.resolve();
+        let processCleanupError: unknown;
+        const stopOwnedProcess = (signal: NodeJS.Signals) => {
+          const pending = signalRunningProcess({ child, processGroupId }, signal);
+          if (pending) {
+            processCleanup = pending.catch((error: unknown) => {
+              processCleanupError = error;
+              onLogError(error, runId, "provider process-tree cleanup could not be verified");
+              reject(error);
+            });
+          }
+        };
 
         const clearTerminalCleanupTimers = () => {
           if (terminalCleanupTimer) clearTimeout(terminalCleanupTimer);
@@ -4861,14 +4879,15 @@ export async function runChildProcess(
             terminalCleanupTimer = null;
             if (terminalCleanupStarted || timedOut) return;
             terminalCleanupStarted = true;
-            terminalCleanupSignal = "SIGTERM";
-            signalRunningProcess({ child, processGroupId }, "SIGTERM");
+            terminalCleanupSignal = process.platform === "win32" ? null : "SIGTERM";
+            terminalCleanupForceKilled = process.platform === "win32";
+            stopOwnedProcess("SIGTERM");
             terminalCleanupKillTimer = setTimeout(
               () => {
                 terminalCleanupKillTimer = null;
-                terminalCleanupSignal = "SIGKILL";
+                terminalCleanupSignal = process.platform === "win32" ? null : "SIGKILL";
                 terminalCleanupForceKilled = true;
-                signalRunningProcess({ child, processGroupId }, "SIGKILL");
+                stopOwnedProcess("SIGKILL");
               },
               Math.max(1, opts.graceSec) * 1000,
             );
@@ -4880,10 +4899,10 @@ export async function runChildProcess(
             ? setTimeout(() => {
                 timedOut = true;
                 clearTerminalCleanupTimers();
-                signalRunningProcess({ child, processGroupId }, "SIGTERM");
-                setTimeout(
+                stopOwnedProcess("SIGTERM");
+                timeoutKillTimer = setTimeout(
                   () => {
-                    signalRunningProcess({ child, processGroupId }, "SIGKILL");
+                    stopOwnedProcess("SIGKILL");
                   },
                   Math.max(1, opts.graceSec) * 1000,
                 );
@@ -4937,6 +4956,7 @@ export async function runChildProcess(
 
         child.on("error", (err: Error) => {
           if (timeout) clearTimeout(timeout);
+          if (process.platform === "win32" && timeoutKillTimer) clearTimeout(timeoutKillTimer);
           clearTerminalCleanupTimers();
           runningProcesses.delete(runId);
           void target.cleanup?.();
@@ -4957,12 +4977,26 @@ export async function runChildProcess(
           "close",
           (code: number | null, signal: NodeJS.Signals | null) => {
             if (timeout) clearTimeout(timeout);
+            if (process.platform === "win32" && timeoutKillTimer) clearTimeout(timeoutKillTimer);
             clearTerminalCleanupTimers();
-            runningProcesses.delete(runId);
             void logChain.finally(() => {
               void Promise.resolve()
-                .then(() => target.cleanup?.())
-                .finally(() => {
+                .then(async () => {
+                  try {
+                    await processCleanup;
+                    await waitForWindowsProviderCleanup(child);
+                    if (processCleanupError) throw processCleanupError;
+                  } finally {
+                    // Temporary SSH credentials still need best-effort cleanup
+                    // when Windows process-tree verification fails.
+                    try {
+                      await target.cleanup?.();
+                    } catch (error) {
+                      onLogError(error, runId, "failed to clean up execution target");
+                    }
+                  }
+                })
+                .then(() => {
                   resolve({
                     exitCode: code,
                     signal,
@@ -4983,6 +5017,10 @@ export async function runChildProcess(
                         }
                       : null,
                   });
+                })
+                .catch(reject)
+                .finally(() => {
+                  if (runningProcesses.get(runId)?.child === child) runningProcesses.delete(runId);
                 });
             });
           },

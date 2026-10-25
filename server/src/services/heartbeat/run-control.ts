@@ -225,7 +225,8 @@ export async function terminateHeartbeatRunProcess(input: {
           ? processGroupId
           : null,
     },
-    { forceAfterMs: input.graceMs, signal: input.signal },
+    { forceAfterMs: input.graceMs, signal: input.signal,
+      ...(process.platform === "win32" ? { requireProviderTree: true } : {}) },
   );
 }
 

@@ -6,6 +6,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
+import { hasWindowsProviderProcess, terminateWindowsProviderTree } from "@paperclipai/adapter-utils/windows-process-tree";
 
 const execFileAsync = promisify(execFile);
 
@@ -548,8 +549,15 @@ export async function touchLocalServiceRegistryRecord(
 export async function terminateLocalService(
   record: Pick<LocalServiceRegistryRecord, "pid" | "processGroupId"> &
     Partial<Pick<LocalServiceRegistryRecord, "port">>,
-  opts?: { signal?: NodeJS.Signals; forceAfterMs?: number; verifyAfterMs?: number },
+  opts?: { signal?: NodeJS.Signals; forceAfterMs?: number; verifyAfterMs?: number; requireProviderTree?: boolean },
 ) {
+  // Provider roots have captured launch ownership. Other development services
+  // keep their existing lifecycle; a missing provider owner never falls back
+  // to signalling an unverified numeric PID.
+  if (process.platform === "win32" && (opts?.requireProviderTree || hasWindowsProviderProcess(record.pid))) {
+    await terminateWindowsProviderTree(record.pid);
+    return;
+  }
   const signal = opts?.signal ?? "SIGTERM";
   const targetProcessGroup = process.platform !== "win32" && record.processGroupId && record.processGroupId > 0;
 

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { execute } from "@paperclipai/adapter-codex-local/server";
+import { resolveManagedCodexHomeDir } from "../../../packages/adapters/codex-local/src/server/codex-home.js";
 import { buildPaperclipTaskMarkdown } from "../services/heartbeat.js";
 import { AGENT_CHAT_DIRECTIVE } from "../services/agent-conversations.js";
 
@@ -34,7 +35,12 @@ console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-session-1
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hello" } }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
 `;
-  await fs.writeFile(commandPath, script, "utf8");
+  if (process.platform === "win32" && commandPath.endsWith(".cmd")) {
+    await fs.writeFile(`${commandPath}.cjs`, script, "utf8");
+    await fs.writeFile(commandPath, `@echo off\r\n"${process.execPath}" "%~f0.cjs" %*\r\n`, "utf8");
+  } else {
+    await fs.writeFile(commandPath, script, "utf8");
+  }
   await fs.chmod(commandPath, 0o755);
 }
 
@@ -1583,7 +1589,7 @@ process.exit(1);
   it("isolates connector skills by agent and revision without changing the selected model identity", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-connector-codex-"));
     const workspace = path.join(root, "workspace");
-    const command = path.join(root, "codex");
+    const command = path.join(root, process.platform === "win32" ? "codex.cmd" : "codex");
     const capture = path.join(root, "capture.json");
     const sourceHome = path.join(root, "selected-account");
     const skillSource = path.join(root, "skill-v1");
@@ -1618,7 +1624,8 @@ process.exit(1);
     };
     try {
       const first = await invoke("agent-1", "a".repeat(64));
-      expect(first.codexHome).toContain("connector-runtimes/agent-1/");
+      expect(first.codexHome).toContain(process.platform === "win32"
+        ? `${path.sep}rt${path.sep}` : `${path.sep}connector-runtimes${path.sep}agent-1${path.sep}`);
       expect(await fs.realpath(path.join(first.codexHome!, "auth.json"))).toBe(await fs.realpath(path.join(sourceHome, "auth.json")));
       expect(await fs.readFile(path.join(first.codexHome!, "skills/agentmail/SKILL.md"), "utf8")).toContain("inbox one");
       await expect(fs.stat(path.join(sourceHome, "skills/agentmail"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -1636,7 +1643,8 @@ process.exit(1);
       const removed = await invoke("agent-1", null);
       expect(removed.prompt).not.toContain("inline@example.test");
       expect(removed.codexHome).not.toBe(sourceHome);
-      expect(removed.codexHome).toContain("skill-runtimes/agent-1/");
+      expect(removed.codexHome).toContain(process.platform === "win32"
+        ? `${path.sep}rt${path.sep}` : `${path.sep}skill-runtimes${path.sep}agent-1${path.sep}`);
       await expect(fs.stat(path.join(removed.codexHome!, "skills/agentmail"))).rejects.toMatchObject({ code: "ENOENT" });
       // Remote credential copy-back leaves a regular file. A later authorized
       // account switch must not reuse that previous account's generated home.
@@ -1662,7 +1670,7 @@ process.exit(1);
   it.each([false, true])("isolates private skills and keeps custom routing with an explicit credential home: %s", async (explicitHome) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-private-codex-"));
     const workspace = path.join(root, "workspace");
-    const command = path.join(root, "codex");
+    const command = path.join(root, process.platform === "win32" ? "codex.cmd" : "codex");
     const capture = path.join(root, "capture.json");
     const sourceHome = path.join(root, "selected-account");
     const skillSource = path.join(root, "skill-v1");
@@ -1700,7 +1708,8 @@ process.exit(1);
     };
     try {
       const first = await invoke("agent-1", "a".repeat(64));
-      expect(first.codexHome).toContain("skill-runtimes/agent-1/");
+      expect(first.codexHome).toContain(process.platform === "win32"
+        ? `${path.sep}rt${path.sep}` : `${path.sep}skill-runtimes${path.sep}agent-1${path.sep}`);
       expect(first.codexConfigContents).toContain('model_provider = "test_gateway"');
       expect(first.codexConfigContents).toContain('base_url = "https://gateway.example/v1"');
       expect(await fs.realpath(path.join(first.codexHome!, "auth.json"))).toBe(await fs.realpath(path.join(sourceHome, "auth.json")));
@@ -1727,12 +1736,13 @@ process.exit(1);
       expect(removed.codexConfigContents).toContain('model_provider = "test_gateway"');
       expect(await fs.realpath(path.join(removed.codexHome!, "auth.json"))).toBe(await fs.realpath(path.join(sourceHome, "auth.json")));
       expect(removed.codexHome).not.toBe(sourceHome);
-      expect(removed.codexHome).toContain("skill-runtimes/agent-1/");
+      expect(removed.codexHome).toContain(process.platform === "win32"
+        ? `${path.sep}rt${path.sep}` : `${path.sep}skill-runtimes${path.sep}agent-1${path.sep}`);
       await expect(fs.stat(path.join(removed.codexHome!, "skills/agentmail"))).rejects.toMatchObject({ code: "ENOENT" });
       if (!explicitHome) {
         // A promoted company login can differ from the host's default account.
         // Digest and seeding must use that same effective credential source.
-        const companyHome = path.resolve(first.codexHome!, "../../..");
+        const companyHome = resolveManagedCodexHomeDir(process.env, "company-1");
         await fs.unlink(path.join(companyHome, "auth.json"));
         const originalAccount = JSON.stringify({ tokens: { account_id: "company-account-one", access_token: "test-token-one" } });
         await fs.writeFile(path.join(companyHome, "auth.json"), originalAccount);

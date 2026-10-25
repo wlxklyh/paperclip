@@ -96,6 +96,7 @@ import {
   resolveCodexAuthPrecedence,
 } from "./auth-precedence.js";
 import { prepareCodexRuntimeConfig } from "./runtime-config.js";
+import { resolveCodexRuntimeHome } from "./runtime-home.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
@@ -686,7 +687,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     })).digest("hex");
     // Different authorized versions/assignments get separate homes, including
     // session state. Previously permitted private links cannot survive revocation.
-    configuredCodexHome = path.join(resolveManagedCodexHomeDir(process.env, agent.companyId),
+    configuredCodexHome = resolveCodexRuntimeHome(resolveManagedCodexHomeDir(process.env, agent.companyId),
       connectorSkillDigest ? "connector-runtimes" : "skill-runtimes", agent.id, runtimeSkillDigest);
   }
   if (!executionTargetIsRemote) {

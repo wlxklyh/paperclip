@@ -8,7 +8,7 @@
 // plugin's own package.json so the published tarballs cannot carry a lifecycle
 // script that escapes their package directory at install time.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, symlinkSync, unlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -78,11 +78,11 @@ export function linkSdkInto(packageDir) {
   try {
     const stat = lstatSync(linkTarget);
     if (stat.isSymbolicLink()) {
-      if (readlinkSync(linkTarget) === relativeSdkDir) {
+      if (resolve(scopeDir, readlinkSync(linkTarget)) === sdkDir) {
         // Already linked to the in-repo SDK; nothing to do.
         return false;
       }
-      rmSync(linkTarget, { force: true });
+      unlinkSync(linkTarget);
     } else {
       // A real install has already populated @paperclipai/plugin-sdk (e.g. the
       // plugin host did `npm install` of the published tarball). Leave it.
@@ -93,6 +93,9 @@ export function linkSdkInto(packageDir) {
     if (error?.code !== "ENOENT") throw error;
   }
 
-  symlinkSync(relativeSdkDir, linkTarget, "dir");
+  // Directory junctions do not require Windows Developer Mode or elevation.
+  // They use absolute targets, while POSIX keeps relocatable relative links.
+  symlinkSync(process.platform === "win32" ? sdkDir : relativeSdkDir, linkTarget,
+    process.platform === "win32" ? "junction" : "dir");
   return true;
 }
